@@ -21,6 +21,7 @@ from .const import (
     CONF_ADDRESSES,
     CONF_AUTH_ID,
     CONF_AUTH_METHOD,
+    CONF_CALL_LISTENER_ENABLED,
     CONF_DEVICE_ID,
     CONF_GO2RTC_ENABLED,
     CONF_GO2RTC_URL,
@@ -32,6 +33,7 @@ from .const import (
     CONF_TOKEN,
     CONF_USERNAME,
     CONF_USER_ID,
+    DEFAULT_CALL_LISTENER_ENABLED,
     DEFAULT_GO2RTC_ENABLED,
     DEFAULT_GO2RTC_URL,
     DEFAULT_SCAN_INTERVAL,
@@ -112,14 +114,22 @@ class DomofonConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 await self.async_set_unique_id(f"login_{user_input[CONF_USERNAME]}")
                 self._abort_if_unique_id_configured()
+                entry_data = {
+                    CONF_AUTH_METHOD: AUTH_METHOD_LOGIN,
+                    CONF_USERNAME: user_input[CONF_USERNAME],
+                    CONF_PASSWORD: user_input[CONF_PASSWORD],
+                    CONF_TOKEN: token,
+                }
+                # Необязательный номер телефона — при входе по логину/паролю
+                # сервер его нигде не хранит и не возвращает (проверено
+                # разбором официального приложения: даже оно не знает номер
+                # в этом случае). Без него не будет работать FCM-слушатель
+                # звонков (см. data_description в translations/ru.json).
+                if user_input.get(CONF_PHONE):
+                    entry_data[CONF_PHONE] = user_input[CONF_PHONE]
                 return self.async_create_entry(
                     title=user_input[CONF_USERNAME],
-                    data={
-                        CONF_AUTH_METHOD: AUTH_METHOD_LOGIN,
-                        CONF_USERNAME: user_input[CONF_USERNAME],
-                        CONF_PASSWORD: user_input[CONF_PASSWORD],
-                        CONF_TOKEN: token,
-                    },
+                    data=entry_data,
                 )
 
         return self.async_show_form(
@@ -128,6 +138,7 @@ class DomofonConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(CONF_USERNAME): str,
                     vol.Required(CONF_PASSWORD): str,
+                    vol.Optional(CONF_PHONE): str,
                 }
             ),
             errors=errors,
@@ -271,8 +282,17 @@ class DomofonOptionsFlow(config_entries.OptionsFlow):
         )
 
     async def async_step_settings(self, user_input: dict[str, Any] | None = None):
-        """Интервал обновления данных о камерах и настройки go2rtc."""
+        """Интервал обновления данных о камерах, настройки go2rtc и
+        FCM-слушателя звонков."""
         if user_input is not None:
+            # Номер телефона живёт в entry.data (как и у авторизации по
+            # телефону), а не в entry.options — убираем его из словаря
+            # опций перед сохранением и обновляем entry.data отдельно.
+            phone = user_input.pop(CONF_PHONE, None)
+            if phone:
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data={**self.config_entry.data, CONF_PHONE: phone}
+                )
             return self.async_create_entry(title="", data=user_input)
 
         current_scan = self.config_entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
@@ -280,19 +300,36 @@ class DomofonOptionsFlow(config_entries.OptionsFlow):
             CONF_GO2RTC_ENABLED, DEFAULT_GO2RTC_ENABLED
         )
         current_go2rtc_url = self.config_entry.options.get(CONF_GO2RTC_URL, DEFAULT_GO2RTC_URL)
+
+        schema_dict: dict[Any, Any] = {
+            vol.Required(CONF_SCAN_INTERVAL, default=current_scan): vol.All(
+                vol.Coerce(int), vol.Range(min=MIN_SCAN_INTERVAL, max=MAX_SCAN_INTERVAL)
+            ),
+            vol.Required(CONF_GO2RTC_ENABLED, default=current_go2rtc_enabled): bool,
+            vol.Required(CONF_GO2RTC_URL, default=current_go2rtc_url): str,
+        }
+
+        # Вход по логину/паролю не даёт номер телефона автоматически (см.
+        # data_description ниже) — предлагаем ввести его вручную, если ещё
+        # не введён. Показывается только для этого способа входа.
+        has_phone = bool(self.config_entry.data.get(CONF_PHONE))
+        if self.config_entry.data.get(CONF_AUTH_METHOD) == AUTH_METHOD_LOGIN and not has_phone:
+            schema_dict[vol.Optional(CONF_PHONE)] = str
+
+        # FCM-слушатель звонков работает, только если номер телефона
+        # известен — либо получен при входе по SMS, либо введён вручную
+        # выше (в этом же шаге, на следующем сохранении).
+        if has_phone:
+            current_call_listener = self.config_entry.options.get(
+                CONF_CALL_LISTENER_ENABLED, DEFAULT_CALL_LISTENER_ENABLED
+            )
+            schema_dict[
+                vol.Required(CONF_CALL_LISTENER_ENABLED, default=current_call_listener)
+            ] = bool
+
         return self.async_show_form(
             step_id="settings",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_SCAN_INTERVAL, default=current_scan): vol.All(
-                        vol.Coerce(int), vol.Range(min=MIN_SCAN_INTERVAL, max=MAX_SCAN_INTERVAL)
-                    ),
-                    vol.Required(
-                        CONF_GO2RTC_ENABLED, default=current_go2rtc_enabled
-                    ): bool,
-                    vol.Required(CONF_GO2RTC_URL, default=current_go2rtc_url): str,
-                }
-            ),
+            data_schema=vol.Schema(schema_dict),
         )
 
     # ------------------------------------------------------------------ #

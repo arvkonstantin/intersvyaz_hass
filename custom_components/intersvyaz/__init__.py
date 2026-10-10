@@ -17,17 +17,21 @@ from .api import IntersvyazApiClient, IntersvyazApiError, IntersvyazAuthError
 from .const import (
     CONF_ADDRESS,
     CONF_ADDRESSES,
+    CONF_CALL_LISTENER_ENABLED,
+    CONF_PHONE,
     CONF_PRIMARY_USER_ID,
     CONF_SCAN_INTERVAL,
     CONF_TOKEN,
     CONF_USER_ID,
+    DEFAULT_CALL_LISTENER_ENABLED,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
 )
+from .fcm_listener import FcmCallListener
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.CAMERA, Platform.BUTTON]
+PLATFORMS = [Platform.CAMERA, Platform.BUTTON, Platform.SENSOR]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
@@ -185,6 +189,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
+    # FCM-слушатель звонков — только для авторизации по телефону (номер,
+    # на который шлются пуши, неизвестен интеграции при логине/пароле) и
+    # только если явно включено в настройках (см. config_flow.py).
+    phone = entry.data.get(CONF_PHONE)
+    call_listener_enabled = entry.options.get(
+        CONF_CALL_LISTENER_ENABLED, DEFAULT_CALL_LISTENER_ENABLED
+    )
+    if phone and call_listener_enabled:
+        listener = FcmCallListener(hass, accounts[0]["client"], phone, entry.entry_id)
+        listener.on_call_detected = lambda: _trigger_call_indicator(hass, entry.entry_id)
+        try:
+            await listener.async_start()
+            hass.data[DOMAIN][entry.entry_id]["call_listener"] = listener
+        except Exception:  # noqa: BLE001 — не роняем всю интеграцию из-за FCM
+            _LOGGER.exception(
+                "Не удалось запустить FCM-слушатель звонков, "
+                "камеры и кнопка открытия двери продолжат работать"
+            )
+
     if not hass.services.has_service(DOMAIN, "open_door"):
         # Сервис исторически привязан к первому обнаруженному аккаунту
         # (см. кнопку "Открыть" у каждого устройства для точечного
@@ -206,8 +229,24 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
     await hass.config_entries.async_reload(entry.entry_id)
 
 
+def _trigger_call_indicator(hass: HomeAssistant, entry_id: str) -> None:
+    """Находит сущность-индикатор звонка (см. sensor.py) через hass.data и
+    включает её на CALL_INDICATOR_RESET_SECONDS секунд. Реализовано через
+    поиск по hass.data, а не прямую ссылку, чтобы не зависеть от порядка
+    запуска FCM-слушателя и платформы sensor."""
+    entity = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("call_indicator_entity")
+    if entity is not None:
+        entity.trigger_call()
+    else:
+        _LOGGER.debug("Сущность-индикатор звонка ещё не готова, пропускаю")
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Выгрузка записи конфигурации."""
+    listener = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("call_listener")
+    if listener is not None:
+        await listener.async_stop()
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)

@@ -75,7 +75,7 @@ async def _async_sync_go2rtc_streams(
         if not src:
             continue
 
-        stream = _stream_name(camera.name)
+        stream = "intersvyaz_" + camera._uuid.replace("-", "_")
         try:
             async with session.put(
                 f"{base_url}/api/streams",
@@ -83,12 +83,9 @@ async def _async_sync_go2rtc_streams(
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status >= 400:
-                    text = await resp.text()
                     _LOGGER.warning(
-                        "go2rtc: не удалось зарегистрировать поток %s (HTTP %s): %s",
-                        stream,
-                        resp.status,
-                        text,
+                        "go2rtc: не удалось зарегистрировать поток %s (HTTP %s)",
+                        stream, resp.status,
                     )
                 else:
                     _LOGGER.debug(
@@ -100,7 +97,7 @@ async def _async_sync_go2rtc_streams(
                 "запущен и адрес указан верно в настройках интеграции "
                 "(Настройки → Интервал обновления)",
                 base_url,
-                err,
+                type(err).__name__,
             )
             return  # сервер недоступен — нет смысла пробовать оставшиеся камеры
 
@@ -108,37 +105,7 @@ async def _async_sync_go2rtc_streams(
 def _log_manual_go2rtc_block(cameras: list["IntersvyazCamera"]) -> None:
     """Выводит блок для ручного копирования в go2rtc.yaml (запасной вариант)."""
     _LOGGER.info("")
-    _LOGGER.info("=" * 72)
-    _LOGGER.info(
-        "Автоматическая регистрация в go2rtc отключена или недоступна. "
-        "Скопируйте блок ниже в go2rtc.yaml"
-    )
-    _LOGGER.info("")
-    _LOGGER.info("streams:")
-
-    rtsp_urls: list[str] = []
-    for camera in cameras:
-        src = _go2rtc_src(camera)
-        if not src:
-            continue
-        stream = _stream_name(camera.name)
-        _LOGGER.info("  %s:", stream)
-        _LOGGER.info('    - "%s"', src)
-        rtsp_urls.append(f"rtsp://127.0.0.1:8554/{stream}")
-
-    if rtsp_urls:
-        _LOGGER.info("")
-        _LOGGER.info("After restarting go2rtc the streams will be available as:")
-        _LOGGER.info("")
-        for url in rtsp_urls:
-            _LOGGER.info("  %s", url)
-    else:
-        _LOGGER.info("")
-        _LOGGER.info("No MSE streams were returned by API.")
-
-    _LOGGER.info("=" * 72)
-    _LOGGER.info("")
-
+    _LOGGER.info("go2rtc выключен; включите его в настройках для просмотра потоков (подписанные ссылки скрыты)")
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities
@@ -267,7 +234,7 @@ class IntersvyazCamera(CoordinatorEntity[IntersvyazDataUpdateCoordinator], Camer
         mse_url = media.get("MSE", {}).get("LIVE") or self._camera_data.get(
             "REALTIME_WS", {}
         ).get("combined")
-        attrs: dict = {"uuid": self._uuid}
+        attrs: dict = {"uuid": self._uuid, "go2rtc_stream": "intersvyaz_" + self._uuid.replace("-", "_")}
         if mse_url:
             attrs["mse_url"] = mse_url
         return attrs
@@ -299,26 +266,22 @@ class IntersvyazCamera(CoordinatorEntity[IntersvyazDataUpdateCoordinator], Camer
 
             media = self._camera_data.get("MEDIA", {})
             live = media.get("HLS", {}).get("LIVE", {})
-            _LOGGER.debug("Камера %s: варианты потока от API: %s", self._uuid, live)
+            _LOGGER.debug("Камера %s: варианты потока получены", self._uuid)
 
             if live:
                 url = live.get("MAIN") or live.get("LOW_LATENCY")
                 if url:
                     variant = "MAIN" if live.get("MAIN") else "LOW_LATENCY"
                     _LOGGER.info(
-                        "Камера %s: используется вариант потока %s: %s",
-                        self._uuid,
-                        variant,
-                        url,
+                        "Камера %s: используется вариант потока %s",
+                        self._uuid, variant,
                     )
                     return url
 
             if self._client.token:
                 url = self._client.fallback_stream_url(self._uuid)
                 _LOGGER.info(
-                    "Камера %s: используется резервный (fallback) URL потока: %s",
-                    self._uuid,
-                    url,
+                    "Камера %s: используется резервный поток", self._uuid,
                 )
                 return url
 
@@ -351,6 +314,6 @@ class IntersvyazCamera(CoordinatorEntity[IntersvyazDataUpdateCoordinator], Camer
                     "Не удалось получить snapshot камеры %s: HTTP %s", self._uuid, resp.status
                 )
         except aiohttp.ClientError as err:
-            _LOGGER.debug("Ошибка при получении snapshot камеры %s: %s", self._uuid, err)
+            _LOGGER.debug("Ошибка при получении snapshot камеры %s: %s", self._uuid, type(err).__name__)
 
         return None

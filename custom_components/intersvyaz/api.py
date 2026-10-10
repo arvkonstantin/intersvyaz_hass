@@ -19,6 +19,7 @@ _LOGGER = logging.getLogger(__name__)
 BASE_URL = "https://api.is74.ru"
 BASE_URL_CAM = "https://cams.is74.ru"
 BASE_URL_CDN = "https://cdn.cams.is74.ru"
+BASE_URL_TD_CRM = "https://td-crm.is74.ru/api"
 
 API_TIMEOUT = aiohttp.ClientTimeout(total=15)
 
@@ -60,9 +61,11 @@ class IntersvyazApiClient:
                     raise IntersvyazAuthError(
                         f"Ошибка авторизации ({resp.status}) при запросе {url}"
                     )
-                if resp.status != 200:
-                    _LOGGER.debug("Ответ %s на %s: %s", resp.status, url, text[:500])
-                    raise IntersvyazApiError(f"HTTP {resp.status} при запросе {url}")
+                if not (200 <= resp.status < 300):
+                    _LOGGER.debug("Ответ HTTP %s на %s", resp.status, url)
+                    raise IntersvyazApiError(
+                        f"HTTP {resp.status} при запросе {url}"
+                    )
 
                 if not text:
                     return None
@@ -172,6 +175,121 @@ class IntersvyazApiClient:
             auth=True,
             headers={"Content-Type": "application/json"},
         )
+
+    # ------------------------------------------------------------------ #
+    # Push-токен (регистрация "виртуального устройства" для приёма
+    # data-пушей о звонках в домофон через FCM — см. fcm_listener.py)
+    # ------------------------------------------------------------------ #
+    async def register_push_token(
+        self,
+        fcm_token: str,
+        unique_device_id: str,
+        authorize_phone: str,
+        first_sim_phone: str | None = None,
+        version_name: str = "2.20.0",
+        assembly_code: int = 2026081813,
+        os_version: str = "14",
+        device_model: str = "Home Assistant",
+    ) -> str:
+        """Регистрирует FCM push-токен на бэкенде api.is74.ru — сервер
+        начинает слать на него data-пуши, как для настоящего Android-
+        приложения. Возвращает ID регистрации устройства."""
+        data = await self._request(
+            "PUT",
+            f"{BASE_URL}/mobile/pushtoken/add-with-device-id",
+            auth=True,
+            json={
+                "TOKEN": fcm_token,
+                "TYPE": 3,  # TOKEN_TYPE_FIREBASE
+                "UNIQUE_DEVICE_ID": unique_device_id,
+                "FIRST_SIM_PHONE": first_sim_phone.replace("+7", "") if first_sim_phone else None,
+                "AUTHORIZE_PHONE": authorize_phone.replace("+7", ""),
+                "VERS_NAME": version_name,
+                "ASSEMBLY_CODE": assembly_code,
+                "OS_VERS": os_version,
+                "DEVICE_MODEL": device_model,
+            },
+            headers={"Content-Type": "application/json"},
+        )
+        if not data or "ID" not in data:
+            raise IntersvyazApiError("Сервер не вернул ID регистрации устройства")
+        return data["ID"]
+
+    # ------------------------------------------------------------------ #
+    # td-crm.is74.ru — отдельный бэкенд, регистрирует то же "виртуальное
+    # устройство" во ВТОРОМ списке push-получателей. Судя по практике,
+    # именно эта регистрация (а не register_push_token выше) реально
+    # нужна для получения пушей о звонках в домофон.
+    # ------------------------------------------------------------------ #
+    TD_BUYER_ID = 1  # захардкоженная константа во всех версиях приложения
+
+    async def check_td_token(self, td_token: str) -> bool:
+        """GET auth на td-crm.is74.ru — проверяет, жив ли уже имеющийся
+        td-токен, не тратя новую сессию через auth_lk()."""
+        try:
+            await self._request(
+                "GET",
+                f"{BASE_URL_TD_CRM}/auth",
+                headers={"Authorization": f"Bearer {td_token}"},
+            )
+            return True
+        except (IntersvyazApiError, IntersvyazAuthError):
+            return False
+
+    async def auth_lk(self) -> dict:
+        """Обменивает текущий токен api.is74.ru на отдельный токен td-crm
+        (buyerId всегда 1, см. TD_BUYER_ID)."""
+        if not self.token:
+            raise IntersvyazAuthError("Токен api.is74.ru не установлен")
+        data = await self._request(
+            "POST",
+            f"{BASE_URL_TD_CRM}/auth-lk",
+            data={"token": self.token, "buyerId": str(self.TD_BUYER_ID)},
+        )
+        if not data or "TOKEN" not in data:
+            raise IntersvyazApiError("td-crm не вернул TOKEN в ответе auth-lk")
+        return data
+
+    async def register_td_device(
+        self,
+        td_token: str,
+        *,
+        app_id: str,
+        push_token: str,
+        platform: str,
+        device_name: str,
+        device_id: str,
+        sending_push: bool = True,
+        notification_type: str = "push",
+    ) -> None:
+        """PUT user-device на td-crm.is74.ru — регистрация устройства для
+        получения push-уведомлений о звонках. Схема подтверждена перехватом
+        реального трафика официального приложения (appId — package name,
+        notificationType="push" обязателен)."""
+        await self._request(
+            "PUT",
+            f"{BASE_URL_TD_CRM}/user-device",
+            headers={"Authorization": f"Bearer {td_token}", "Content-Type": "application/json"},
+            json={
+                "appId": app_id,
+                "pushToken": push_token,
+                "platform": platform,
+                "deviceName": device_name,
+                "deviceId": device_id,
+                "sendingPush": sending_push,
+                "notificationType": notification_type,
+            },
+        )
+
+    async def get_device_settings(self, td_token: str, device_id: str, app_id: str) -> dict:
+        """GET v1/user-device/{deviceId}/{appId}/info на td-crm.is74.ru —
+        как СЕРВЕР видит нашу текущую регистрацию (диагностика)."""
+        data = await self._request(
+            "GET",
+            f"{BASE_URL_TD_CRM}/v1/user-device/{device_id}/{app_id}/info",
+            headers={"Authorization": f"Bearer {td_token}"},
+        )
+        return data or {}
 
     # ------------------------------------------------------------------ #
     # Камеры

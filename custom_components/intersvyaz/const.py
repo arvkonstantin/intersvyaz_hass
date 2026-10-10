@@ -43,3 +43,8 @@ CONF_GO2RTC_ENABLED = "go2rtc_enabled"
 CONF_GO2RTC_URL = "go2rtc_url"
 DEFAULT_GO2RTC_ENABLED = True
 DEFAULT_GO2RTC_URL = "http://127.0.0.1:1984"
+
+# FCM-слушатель звонков (см. fcm_listener.py)
+CONF_CALL_LISTENER_ENABLED = "call_listener_enabled"
+DEFAULT_CALL_LISTENER_ENABLED = False
+EVENT_INCOMING_CALL = f"{DOMAIN}_incoming_call"
